@@ -30,7 +30,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
-#include <string>
+
 #include <ts/ts.h>
 #include <pcre.h>
 #include <pcrecpp.h>
@@ -38,67 +38,72 @@
 #define STATE_BUFFER_DATA     0
 #define STATE_TRANSFORM_DATA  1 
 #define STATE_OUTPUT_DATA     2
-#define ASSERT_SUCCESS(_x) INKAssert ((_x) == INK_SUCCESS)
+
+#define ASSERT_SUCCESS(_x) TSAssert ((_x) == TS_SUCCESS)
 
 using namespace std;
 
 typedef struct {
-  int size, state;
-  INKVIO output_vio;
-  INKIOBuffer output_buffer;
-  INKIOBufferReader output_reader;
-  INKIOBuffer min_buffer;
-  INKIOBufferReader min_buffer_reader;
+  int state;
+  TSVIO output_vio;
+  TSIOBuffer output_buffer;
+  TSIOBufferReader output_reader;
+  TSIOBuffer min_buffer;
+  TSIOBufferReader min_buffer_reader;
 } Data;
 
 static Data * my_data_alloc() {
   Data *data;
-  data = (Data *) INKmalloc(sizeof(Data));
-  INKReleaseAssert(data && data != INK_ERROR_PTR);
+  data = (Data *) TSmalloc(sizeof(Data));
+  TSReleaseAssert(data);
 
   data->state = STATE_BUFFER_DATA;
-  data->size = 0;
+
   data->output_vio = NULL;
   data->output_buffer = NULL;
   data->output_reader = NULL;
-  data->min_buffer = INKIOBufferCreate();
-  data->min_buffer_reader = INKIOBufferReaderAlloc(data->min_buffer);
-  INKAssert(data->min_buffer_reader != INK_ERROR_PTR);
+  data->min_buffer = TSIOBufferCreate();
+  data->min_buffer_reader = TSIOBufferReaderAlloc(data->min_buffer);
+  TSAssert(data->min_buffer_reader);
   return data;
 }
 
 static void my_data_destroy(Data * data) {
   if (data) {
     if (data->output_buffer) {
-      ASSERT_SUCCESS(INKIOBufferDestroy(data->output_buffer));
+      TSIOBufferDestroy(data->output_buffer);
     }
-    INKfree(data);
+    if (data->min_buffer) {
+      TSIOBufferDestroy(data->min_buffer);
+    }
+
+    TSfree(data);
   }
 }
 
-static void write_iobuffer(const char *buf, int len, INKIOBuffer output) {
-  INKIOBufferBlock block;
+static void write_iobuffer(const char *buf, int len, TSIOBuffer output) {
+  TSIOBufferBlock block;
   char *ptr_block;
-  int ndone, ntodo, towrite, avail;
+  int64_t ndone, ntodo, towrite, avail;
 
   ndone = 0;
   ntodo = len;
   while (ntodo > 0) {
-    block = INKIOBufferStart(output);
-    ptr_block = INKIOBufferBlockWriteStart(block, &avail);
+    block = TSIOBufferStart(output);
+    ptr_block = TSIOBufferBlockWriteStart(block, &avail);
     towrite = min(ntodo, avail);
     memcpy(ptr_block, buf + ndone, towrite);
-    INKIOBufferProduce(output, towrite);
+    TSIOBufferProduce(output, towrite);
     ntodo -= towrite;
     ndone += towrite;
   }
 }
 static void cssmin_transform(Data *data) {
-  INKIOBufferBlock block = INKIOBufferReaderStart(data->output_reader);
+  TSIOBufferBlock block = TSIOBufferReaderStart(data->output_reader);
 
   while (block != NULL) {
-    int blocklen;
-    const char * blockptr = INKIOBufferBlockReadStart(block, data->output_reader, &blocklen);
+    int64_t blocklen;
+    const char * blockptr = TSIOBufferBlockReadStart(block, data->output_reader, &blocklen);
     string str (blockptr);
 
     // Strip extra spaces
@@ -114,15 +119,12 @@ static void cssmin_transform(Data *data) {
     write_iobuffer(str.c_str(), strlen(str.c_str()), data->min_buffer);
 
     // Parse next block
-    block = INKIOBufferBlockNext(block);
-    if (block == INK_ERROR_PTR) {
-      INKError("[strsearch_ioreader] Error while getting block from ioreader");
-    }
+    block = TSIOBufferBlockNext(block);
   }
 }
 
-static int handle_buffering(INKCont contp, Data * data) {
-  INKVIO write_vio;
+static int handle_buffering(TSCont contp, Data * data) {
+  TSVIO write_vio;
   int towrite;
   int avail;
 
@@ -130,14 +132,14 @@ static int handle_buffering(INKCont contp, Data * data) {
      ourself. This VIO contains the buffer that we are to read from
      as well as the continuation we are to call when the buffer is
      empty. */
-  write_vio = INKVConnWriteVIOGet(contp);
+  write_vio = TSVConnWriteVIOGet(contp);
 
   /* Create the output buffer and its associated reader */
   if (!data->output_buffer) {
-    data->output_buffer = INKIOBufferCreate();
-    INKAssert(data->output_buffer);
-    data->output_reader = INKIOBufferReaderAlloc(data->output_buffer);
-    INKAssert(data->output_reader);
+    data->output_buffer = TSIOBufferCreate();
+    TSAssert(data->output_buffer);
+    data->output_reader = TSIOBufferReaderAlloc(data->output_buffer);
+    TSAssert(data->output_reader);
   }
 
   /* We also check to see if the write VIO's buffer is non-NULL. A
@@ -146,77 +148,68 @@ static int handle_buffering(INKCont contp, Data * data) {
      more WRITE_READY or WRITE_COMPLETE events. For this buffered
      transformation that means we're done buffering data. */
 
-  if (!INKVIOBufferGet(write_vio)) {
+  if (!TSVIOBufferGet(write_vio)) {
     data->state = STATE_TRANSFORM_DATA;
     return 0;
   }
 
-  towrite = INKVIONTodoGet(write_vio);
+  towrite = TSVIONTodoGet(write_vio);
   if (towrite > 0) {
     /* The amount of data left to read needs to be truncated by
        the amount of data actually in the read buffer. */
 
-    avail = INKIOBufferReaderAvail(INKVIOReaderGet(write_vio));
+    avail = TSIOBufferReaderAvail(TSVIOReaderGet(write_vio));
     if (towrite > avail) {
       towrite = avail;
     }
 
     if (towrite > 0) {
       /* Copy the data from the read buffer to the input buffer. */
-      if (INKIOBufferCopy(data->output_buffer, INKVIOReaderGet(write_vio), towrite, 0) == INK_ERROR) {
-        INKError("[css-transform] Unable to copy read buffer\n");
-        return 0;
-      }
+      TSIOBufferCopy(data->output_buffer, TSVIOReaderGet(write_vio), towrite, 0);
 
       /* Tell the read buffer that we have read the data and are no
          longer interested in it. */
-      if (INKIOBufferReaderConsume(INKVIOReaderGet(write_vio), towrite) == INK_ERROR) {
-        INKError("[css-transform] Unable to copy read buffer\n");
-        return 0;
-      }
+      TSIOBufferReaderConsume(TSVIOReaderGet(write_vio), towrite);
 
       /* Modify the write VIO to reflect how much data we've
          completed. */
-      if (INKVIONDoneSet(write_vio, INKVIONDoneGet(write_vio)
-                         + towrite) == INK_ERROR) {
-        INKError("[css-transform] Unable to copy read buffer\n");
-        return 0;
-      }
+      TSVIONDoneSet(write_vio, TSVIONDoneGet(write_vio)
+		    + towrite);
     }
   }
 
   /* Now we check the write VIO to see if there is data left to read. */
-  if (INKVIONTodoGet(write_vio) > 0) {
+  if (TSVIONTodoGet(write_vio) > 0) {
     if (towrite > 0) {
       /* Call back the write VIO continuation to let it know that we
          are ready for more data. */
-      INKContCall(INKVIOContGet(write_vio), INK_EVENT_VCONN_WRITE_READY, write_vio);
+      TSContCall(TSVIOContGet(write_vio), TS_EVENT_VCONN_WRITE_READY, write_vio);
     }
   } else {
     data->state = STATE_TRANSFORM_DATA;
-    INKContCall(INKVIOContGet(write_vio), INK_EVENT_VCONN_WRITE_COMPLETE, write_vio);
+    TSContCall(TSVIOContGet(write_vio), TS_EVENT_VCONN_WRITE_COMPLETE, write_vio);
   }
 
   return 1;
 }
 
-static int handle_output(INKCont contp, Data * data) {
+static int handle_output(TSCont contp, Data * data) {
   /* Check to see if we need to initiate the output operation. */
   if (!data->output_vio) {
-    INKVConn output_conn;
+    TSVConn output_conn;
 
     /* Get the output connection where we'll write data to. */
-    output_conn = INKTransformOutputVConnGet(contp);
+    output_conn = TSTransformOutputVConnGet(contp);
 
     data->output_vio =
-      INKVConnWrite(output_conn, contp, data->min_buffer_reader, INKIOBufferReaderAvail(data->min_buffer_reader));
+      TSVConnWrite(output_conn, contp, data->min_buffer_reader, TSIOBufferReaderAvail(data->min_buffer_reader));
 
-    INKAssert(data->output_vio);
+    TSAssert(data->output_vio);
   }
   return 1;
 }
 
-static void handle_transform(INKCont contp) {
+static void handle_transform(TSCont contp) {
   Data *data;
   int done;
 
@@ -225,10 +218,10 @@ static void handle_transform(INKCont contp) {
      private data structure pointer is NULL, then we'll create it
      and initialize its internals. */
 
-  data = (Data *) INKContDataGet(contp);
+  data = (Data *) TSContDataGet(contp);
   if (!data) {
     data = my_data_alloc();
-    INKContDataSet(contp, data);
+    TSContDataSet(contp, data);
   }
 
   do {
@@ -249,24 +242,23 @@ static void handle_transform(INKCont contp) {
 }
 
 
-static int transform(INKCont contp, INKEvent event, void *edata) {
-  //Check to see if the transformation has been closed by a call to INKVConnClose
-  if (INKVConnClosedGet(contp)) {
-    my_data_destroy((Data *) INKContDataGet(contp));
-    ASSERT_SUCCESS(INKContDestroy(contp));
-    return 0;
+static int transform(TSCont contp, TSEvent event, void *edata) {
+  //Check to see if the transformation has been closed by a call to TSVConnClose
+  if (TSVConnClosedGet(contp)) {
+    my_data_destroy((Data *) TSContDataGet(contp));
+    TSContDestroy(contp);
   } else {
     switch (event) {
-    case INK_EVENT_ERROR: {
-        INKVIO write_vio;
-        write_vio = INKVConnWriteVIOGet(contp);
-        INKContCall(INKVIOContGet(write_vio), INK_EVENT_ERROR, write_vio);
+    case TS_EVENT_ERROR: {
+        TSVIO write_vio;
+        write_vio = TSVConnWriteVIOGet(contp);
+        TSContCall(TSVIOContGet(write_vio), TS_EVENT_ERROR, write_vio);
       }
       break;
-    case INK_EVENT_VCONN_WRITE_COMPLETE:
-      ASSERT_SUCCESS(INKVConnShutdown(INKTransformOutputVConnGet(contp), 0, 1));
+    case TS_EVENT_VCONN_WRITE_COMPLETE:
+      TSVConnShutdown(TSTransformOutputVConnGet(contp), 0, 1);
       break;
-    case INK_EVENT_VCONN_WRITE_READY:
+    case TS_EVENT_VCONN_WRITE_READY:
     default:
       handle_transform(contp);
       break;
@@ -275,59 +267,56 @@ static int transform(INKCont contp, INKEvent event, void *edata) {
   return 0;
 }
 
-static int transformable(INKHttpTxn txnp) {
-  INKMBuffer bufp;
-  INKMLoc hdr_loc;
-  INKMLoc field_loc;
-  INKHttpStatus resp_status;
+static int transformable(TSHttpTxn txnp) {
+  TSMBuffer bufp;
+  TSMLoc hdr_loc;
+  TSMLoc field_loc;
+  TSHttpStatus resp_status;
   const char *value;
   int val_length;
 
-  INKHttpTxnServerRespGet(txnp, &bufp, &hdr_loc);
+  TSHttpTxnServerRespGet(txnp, &bufp, &hdr_loc);
 
-  if (INK_HTTP_STATUS_OK == (resp_status = INKHttpHdrStatusGet(bufp, hdr_loc))) {
-    field_loc = INKMimeHdrFieldFind(bufp, hdr_loc, "Content-Type", 12);
+  if (TS_HTTP_STATUS_OK == (resp_status = TSHttpHdrStatusGet(bufp, hdr_loc))) {
+    field_loc = TSMimeHdrFieldFind(bufp, hdr_loc, "Content-Type", 12);
     if (!field_loc) {
-      ASSERT_SUCCESS(INKHandleMLocRelease(bufp, INK_NULL_MLOC, hdr_loc));
+      ASSERT_SUCCESS(TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc));
       return 0;
     }
 
-    value = INKMimeHdrFieldValueGet(bufp, hdr_loc, field_loc, 0, &val_length);
+
+    value = TSMimeHdrFieldValueStringGet(bufp, hdr_loc, field_loc, 0, &val_length);
 #ifndef _WIN32
     if (value && (strncasecmp(value, "text/css", sizeof("text/css") - 1) == 0)) {
 #else
     if (value && (strnicmp(value, "text/css", sizeof("text/css") - 1) == 0)) {
 #endif
-      ASSERT_SUCCESS(INKHandleStringRelease(bufp, field_loc, value));
-      ASSERT_SUCCESS(INKHandleMLocRelease(bufp, hdr_loc, field_loc));
-      ASSERT_SUCCESS(INKHandleMLocRelease(bufp, INK_NULL_MLOC, hdr_loc));
+      ASSERT_SUCCESS(TSHandleMLocRelease(bufp, hdr_loc, field_loc));
+      ASSERT_SUCCESS(TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc));
       return 1;
     } else {
-      ASSERT_SUCCESS(INKHandleStringRelease(bufp, field_loc, value));
-      ASSERT_SUCCESS(INKHandleMLocRelease(bufp, hdr_loc, field_loc));
-      ASSERT_SUCCESS(INKHandleMLocRelease(bufp, INK_NULL_MLOC, hdr_loc));
+      ASSERT_SUCCESS(TSHandleMLocRelease(bufp, hdr_loc, field_loc));
+      ASSERT_SUCCESS(TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc));
       return 0;
     }
   }
   return 0;
 }
 
-static void transform_add(INKHttpTxn txnp) {
-  INKVConn connp;
-  connp = INKTransformCreate(transform, txnp);
-  if (INKHttpTxnHookAdd(txnp, INK_HTTP_RESPONSE_TRANSFORM_HOOK, connp) == INK_ERROR) {
-    INKError("[css-transform] Unable to attach plugin to http transaction\n");
-  }
+static void transform_add(TSHttpTxn txnp) {
+  TSVConn connp;
+  connp = TSTransformCreate(transform, txnp);
+  TSHttpTxnHookAdd(txnp, TS_HTTP_RESPONSE_TRANSFORM_HOOK, connp);
 }
 
-static int transform_plugin(INKCont contp, INKEvent event, void *edata) {
-  INKHttpTxn txnp = (INKHttpTxn) edata;
+static int transform_plugin(TSCont contp, TSEvent event, void *edata) {
+  TSHttpTxn txnp = (TSHttpTxn) edata;
   switch (event) {
-  case INK_EVENT_HTTP_READ_RESPONSE_HDR:
+  case TS_EVENT_HTTP_READ_RESPONSE_HDR:
     if (transformable(txnp)) {
       transform_add(txnp);
     }
-    ASSERT_SUCCESS(INKHttpTxnReenable(txnp, INK_EVENT_HTTP_CONTINUE));
+    TSHttpTxnReenable(txnp, TS_EVENT_HTTP_CONTINUE);
     return 0;
   default:
     break;
@@ -336,10 +325,40 @@ static int transform_plugin(INKCont contp, INKEvent event, void *edata) {
   return 0;
 }
 
-void INKPluginInit(int argc, const char *argv[]) {
-  if (INKHttpHookAdd(INK_HTTP_READ_RESPONSE_HDR_HOOK, INKContCreate(transform_plugin, NULL)) == INK_ERROR) {
-    INKError("[css-transform] Unable to set read response header\n");
-    INKError("[css-transform] Unable to initialize plugin\n");
+int check_ts_version () {
+  const char *ts_version = TSTrafficServerVersionGet();
+  int result = 0;
+
+  if (ts_version) {
+    int major_ts_version = 0;
+    int minor_ts_version = 0;
+    int patch_ts_version = 0;
+    if (sscanf(ts_version, "%d.%d.%d", &major_ts_version, &minor_ts_version, &patch_ts_version) != 3) {
+        return 0;
+    }
+    /* Need at least TS 2.0 */
+    if (major_ts_version >= 2) {
+       result = 1;
+    }
   }
-  return;
+  return result;
+}
+
+void TSPluginInit(int argc, const char *argv[]) {
+    TSPluginRegistrationInfo info;
+    info.plugin_name = (char *)"css-transform";
+    info.vendor_name = (char *)"css transform";
+    info.support_email = (char *)"css@domain.tld";
+    if (TSPluginRegister(TS_SDK_VERSION_3_0, &info) != TS_SUCCESS) {
+      TSError("Plugin registration failed.\n");
+      goto Lerror;
+    }
+    if (!check_ts_version()) {
+      TSError("Plugin requires Traffic Server 3.0 or later\n");
+      goto Lerror;
+    }
+    TSHttpHookAdd(TS_HTTP_READ_RESPONSE_HDR_HOOK, TSContCreate(transform_plugin, NULL));
+    return;
+Lerror:
+    TSError("[css-transform] Unable to initialize plugin\n");
 }

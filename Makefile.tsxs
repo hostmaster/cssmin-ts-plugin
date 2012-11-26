@@ -1,0 +1,12 @@
+#
+
+TSXS?=tsxs
+ 
+all:    css-transform.cc
+	$(TSXS) -v -c $? -l pcrecpp -o css-transform.so
+ 
+install:
+	$(TSXS) -i -o css-transform.so
+ 
+clean:
+	rm -f *.lo *.so
